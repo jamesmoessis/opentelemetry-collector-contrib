@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"golang.org/x/sync/errgroup"
 	"sync"
 	"time"
 
@@ -117,9 +118,15 @@ func (e *traceExporterImp) ConsumeTraces(ctx context.Context, td ptrace.Traces) 
 		}
 	}
 
-	var errs error
+	if e.loadBalancer.disableSubQueue {
+		return e.exportParallel(ctx, exporterSegregatedTraces)
+	}
+	return e.exportSeries(ctx, exporterSegregatedTraces)
+}
 
-	for exp, td := range exporterSegregatedTraces {
+func (e *traceExporterImp) exportSeries(ctx context.Context, traces exporterTraces) error {
+	var errs error
+	for exp, td := range traces {
 		start := time.Now()
 		err := exp.ConsumeTraces(ctx, td)
 		exp.consumeWG.Done()
@@ -133,7 +140,42 @@ func (e *traceExporterImp) ConsumeTraces(ctx context.Context, td ptrace.Traces) 
 			e.logger.Debug("failed to export traces", zap.Error(err))
 		}
 	}
+	return errs
+}
 
+func (e *traceExporterImp) exportParallel(ctx context.Context, traces exporterTraces) error {
+	errGroup := errgroup.Group{}
+	errGroup.SetLimit(10) // limits concurrent exports to 10
+	results := make([]error, len(traces))
+	i := 0
+	for exp, td := range traces {
+		errGroup.Go(func() error {
+			start := time.Now()
+			err := exp.ConsumeTraces(ctx, td)
+			results[i] = err // safe because every goroutine is writing to different index
+			exp.consumeWG.Done()
+			duration := time.Since(start)
+			e.telemetry.LoadbalancerBackendLatency.Record(ctx, duration.Milliseconds(), metric.WithAttributeSet(exp.endpointAttr))
+			if err == nil {
+				e.telemetry.LoadbalancerBackendOutcome.Add(ctx, 1, metric.WithAttributeSet(exp.successAttr))
+			} else {
+				e.telemetry.LoadbalancerBackendOutcome.Add(ctx, 1, metric.WithAttributeSet(exp.failureAttr))
+				e.logger.Debug("failed to export traces", zap.Error(err))
+			}
+			return err
+		})
+		i++
+	}
+
+	var errs error
+	firstErr := errGroup.Wait()
+	if firstErr != nil {
+		// there's an error, but errGroup.Wait() only returns the first one.
+		// So we will combine them all into one and return that.
+		for _, err := range results {
+			errs = multierr.Append(errs, err)
+		}
+	}
 	return errs
 }
 
