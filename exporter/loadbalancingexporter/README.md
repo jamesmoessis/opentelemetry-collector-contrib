@@ -84,7 +84,9 @@ To avoid a single point of failure, requests can be distributed among multiple C
 
 Refer to [config.yaml](./testdata/config.yaml) for detailed examples on using the exporter.
 
-* The `otlp` property configures the template used for building the OTLP exporter. Refer to the OTLP Exporter documentation for information on which options are available. Note that the `endpoint` property should not be set and will be overridden by this exporter with the backend endpoint.
+* The `protocol` property configures the sub-exporter, which currently only supports the `otlp` exporter
+  * The `otlp` property configures the template used for building the OTLP exporter. Refer to the OTLP Exporter documentation for information on which options are available. Note that the `endpoint` property should not be set and will be overridden by this exporter with the backend endpoint.
+  * The `invoke_parallel_exporters` property, if set, configures the maximum amount of goroutines to concurrently invoke the sub exporters with. By default, the sub-exporters have a `sending_queue`, so this is only necessary to configure if you are also disabling the sub-exporter's queue causing it to be synchronously invoked. 
 * The `resolver` accepts a `static` node, a `dns`, a `k8s` service or `aws_cloud_map`. If all four are specified, an `errMultipleResolversProvided` error will be thrown.
 * The `hostname` property inside a `dns` node specifies the hostname to query in order to obtain the list of IP addresses.
 * The `dns` node also accepts the following optional properties:

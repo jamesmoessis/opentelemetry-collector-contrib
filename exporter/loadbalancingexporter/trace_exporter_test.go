@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -559,6 +561,99 @@ func TestRollingUpdatesWhenConsumeTraces(t *testing.T) {
 	mu.Unlock()
 	require.Positive(t, counter1.Load())
 	require.Positive(t, counter2.Load())
+}
+
+func TestParallelInvocationWithSubQueueDisabled_Success(t *testing.T) {
+	ts, tb := getTelemetryAssets(t)
+	sink := new(consumertest.TracesSink)
+	componentFactory := func(_ context.Context, _ string) (component.Component, error) {
+		return newMockTracesExporter(sink.ConsumeTraces), nil
+	}
+
+	cfg := simpleConfig()
+	cfg.Protocol.InvokeParallelExporters = 2
+	cfg.Protocol.OTLP.QueueConfig.Enabled = false
+
+	lb, err := newLoadBalancer(ts.Logger, cfg, componentFactory, tb)
+	require.NotNil(t, lb)
+	require.NoError(t, err)
+
+	p, err := newTracesExporter(ts, cfg)
+	require.NotNil(t, p)
+	require.NoError(t, err)
+
+	p.loadBalancer = lb
+	err = p.Start(context.Background(), componenttest.NewNopHost())
+	require.NoError(t, err)
+
+	lb.onBackendChanges([]string{"endpoint-1", "endpoint-2"})
+
+	td1 := simpleTraces()
+	appendSimpleTraceWithID(td1.ResourceSpans().AppendEmpty(), [16]byte{2, 3, 4, 5})
+	appendSimpleTraceWithID(td1.ResourceSpans().AppendEmpty(), [16]byte{6, 6, 7, 8})
+
+	// test
+	err = p.ConsumeTraces(context.Background(), td1)
+
+	// verify
+	assert.NoError(t, err)
+	assert.Len(t, sink.AllTraces(), 2)
+	tracesOut := sink.AllTraces()
+	slices.SortFunc(tracesOut, func(a, b ptrace.Traces) int {
+		return a.SpanCount() - b.SpanCount()
+	})
+	assert.Equal(t, 1, tracesOut[0].SpanCount()) // 1 span to endpoint-2
+	assert.Equal(t, 2, tracesOut[1].SpanCount()) // 2 spans to endpoint-1
+}
+
+func TestParallelInvocationWithSubQueueDisabled_Error(t *testing.T) {
+	ts, tb := getTelemetryAssets(t)
+	sink := new(consumertest.TracesSink)
+	componentFactory := func(_ context.Context, endpoint string) (component.Component, error) {
+		if strings.HasPrefix(endpoint, "endpoint-1") {
+			return newMockTracesExporter(sink.ConsumeTraces), nil
+		}
+		return newMockTracesExporter(func(_ context.Context, _ ptrace.Traces) error {
+			return errors.New("test")
+		}), nil
+	}
+
+	cfg := simpleConfig()
+	cfg.Protocol.InvokeParallelExporters = 2
+	cfg.Protocol.OTLP.QueueConfig.Enabled = false
+
+	lb, err := newLoadBalancer(ts.Logger, cfg, componentFactory, tb)
+	require.NotNil(t, lb)
+	require.NoError(t, err)
+
+	p, err := newTracesExporter(ts, cfg)
+	require.NotNil(t, p)
+	require.NoError(t, err)
+
+	p.loadBalancer = lb
+	err = p.Start(context.Background(), componenttest.NewNopHost())
+	require.NoError(t, err)
+
+	lb.onBackendChanges([]string{"endpoint-1", "endpoint-2"})
+
+	td1 := simpleTraces()
+	appendSimpleTraceWithID(td1.ResourceSpans().AppendEmpty(), [16]byte{2, 3, 4, 5})
+	appendSimpleTraceWithID(td1.ResourceSpans().AppendEmpty(), [16]byte{6, 6, 7, 8})
+
+	// test
+	err = p.ConsumeTraces(context.Background(), td1)
+
+	// verify
+	assert.Error(t, err)
+	assert.Len(t, sink.AllTraces(), 1)
+	tracesOut := sink.AllTraces()
+	slices.SortFunc(tracesOut, func(a, b ptrace.Traces) int {
+		return a.SpanCount() - b.SpanCount()
+	})
+	// ConsumeTraces returned an error because one of the sub-exporters returned error.
+	// However, data from successful exporters still makes it through. Still, all data will be retried.
+	// Ideally only the failed data retried, but it would require further refactoring.
+	assert.Equal(t, 2, tracesOut[0].SpanCount()) // 1 span to endpoint-2
 }
 
 func benchConsumeTraces(b *testing.B, endpointsCount int, tracesCount int) {

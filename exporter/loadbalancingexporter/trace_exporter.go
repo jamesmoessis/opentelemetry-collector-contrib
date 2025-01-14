@@ -5,10 +5,11 @@ package loadbalancingexporter // import "github.com/open-telemetry/opentelemetry
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"golang.org/x/sync/errgroup"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/collector/component"
@@ -19,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/loadbalancingexporter/internal/metadata"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/batchpersignal"
@@ -118,7 +120,7 @@ func (e *traceExporterImp) ConsumeTraces(ctx context.Context, td ptrace.Traces) 
 		}
 	}
 
-	if e.loadBalancer.disableSubQueue {
+	if e.loadBalancer.invokeParallel > 0 {
 		return e.exportParallel(ctx, exporterSegregatedTraces)
 	}
 	return e.exportSeries(ctx, exporterSegregatedTraces)
@@ -145,13 +147,14 @@ func (e *traceExporterImp) exportSeries(ctx context.Context, traces exporterTrac
 
 func (e *traceExporterImp) exportParallel(ctx context.Context, traces exporterTraces) error {
 	errGroup := errgroup.Group{}
-	errGroup.SetLimit(10) // limits concurrent exports to 10
+	errGroup.SetLimit(e.loadBalancer.invokeParallel)
 	results := make([]error, len(traces))
-	i := 0
+	index := atomic.Int32{}
 	for exp, td := range traces {
 		errGroup.Go(func() error {
 			start := time.Now()
 			err := exp.ConsumeTraces(ctx, td)
+			i := index.Add(1) - 1
 			results[i] = err // safe because every goroutine is writing to different index
 			exp.consumeWG.Done()
 			duration := time.Since(start)
@@ -164,7 +167,6 @@ func (e *traceExporterImp) exportParallel(ctx context.Context, traces exporterTr
 			}
 			return err
 		})
-		i++
 	}
 
 	var errs error
@@ -207,6 +209,6 @@ func routingIdentifiersFromTraces(td ptrace.Traces, key routingKey) (map[string]
 		return ids, nil
 	}
 	tid := spans.At(0).TraceID()
-	ids[string(tid[:])] = true
+	ids[hex.EncodeToString(tid[:])] = true
 	return ids, nil
 }

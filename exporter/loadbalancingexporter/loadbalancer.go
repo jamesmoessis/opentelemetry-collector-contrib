@@ -40,7 +40,7 @@ type loadBalancer struct {
 	stopped    bool
 	updateLock sync.RWMutex
 
-	disableSubQueue bool
+	invokeParallel int
 }
 
 // Create new load balancer
@@ -138,7 +138,7 @@ func newLoadBalancer(logger *zap.Logger, cfg component.Config, factory component
 		logger:           logger,
 		res:              res,
 		componentFactory: factory,
-		disableSubQueue:  oCfg.DisableSubQueue,
+		invokeParallel:   oCfg.Protocol.InvokeParallelExporters,
 		exporters:        map[string]*wrappedExporter{},
 	}, nil
 }

@@ -36,15 +36,15 @@ type Config struct {
 	configretry.BackOffConfig `mapstructure:"retry_on_failure"`
 	QueueSettings             exporterhelper.QueueConfig `mapstructure:"sending_queue"`
 
-	Protocol        Protocol         `mapstructure:"protocol"`
-	Resolver        ResolverSettings `mapstructure:"resolver"`
-	RoutingKey      string           `mapstructure:"routing_key"`
-	DisableSubQueue bool             `mapstructure:"disable_sub_queue"`
+	Protocol   Protocol         `mapstructure:"protocol"`
+	Resolver   ResolverSettings `mapstructure:"resolver"`
+	RoutingKey string           `mapstructure:"routing_key"`
 }
 
 // Protocol holds the individual protocol-specific settings. Only OTLP is supported at the moment.
 type Protocol struct {
-	OTLP otlpexporter.Config `mapstructure:"otlp"`
+	InvokeParallelExporters int                 `mapstructure:"invoke_parallel_exporters"`
+	OTLP                    otlpexporter.Config `mapstructure:"otlp"`
 }
 
 // ResolverSettings defines the configurations for the backend resolver
