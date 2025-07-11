@@ -4,11 +4,12 @@
 package loadbalancingexporter // import "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/loadbalancingexporter"
 
 import (
+	"encoding/binary"
 	"hash/crc32"
 	"sort"
 )
 
-const (
+var (
 	maxPositions  uint32 = 36000 // 360 degrees with two decimal places
 	defaultWeight int    = 100   // the number of points in the ring for each entry. For better results, it should be greater than 100.
 )
@@ -103,10 +104,12 @@ func bsearch(pos position, left []ringItem, right []ringItem) ringItem {
 // The slice length of the result matches the numPoints.
 func positionsFor(endpoint string, numPoints int) []position {
 	res := make([]position, 0, numPoints)
+	buf := make([]byte, 4)
 	for i := 0; i < numPoints; i++ {
 		h := crc32.NewIEEE()
 		h.Write([]byte(endpoint))
-		h.Write([]byte{byte(i)})
+		binary.LittleEndian.PutUint32(buf, uint32(i))
+		h.Write(buf)
 		hash := h.Sum32()
 		pos := hash % maxPositions
 		res = append(res, position(pos))
@@ -123,10 +126,17 @@ func positionsForEndpoints(endpoints []string, weight int) []ringItem {
 		// for this initial implementation, we don't allow endpoints to have custom weights
 		for _, pos := range positionsFor(endpoint, weight) {
 			// if this position is occupied already, skip this item
-			if _, found := positions[pos]; found {
+			actualPos := pos
+			probeLimit := 10
+			i := 0
+			for positions[actualPos] && i < probeLimit {
+				actualPos = (actualPos + 1) % position(maxPositions)
+				i++
+			}
+			if i >= probeLimit {
 				continue
 			}
-			positions[pos] = true
+			positions[actualPos] = true
 
 			item := ringItem{
 				pos:      pos,
